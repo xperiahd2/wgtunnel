@@ -1,6 +1,6 @@
 name: build
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_dispatch:
@@ -18,44 +18,10 @@ on:
         type: choice
         description: "Product flavor"
         required: true
-        default: fdroid
+        default: standalone
         options:
           - fdroid
           - standalone
-    secrets:
-      SIGNING_KEY_ALIAS:
-        required: false
-      SIGNING_KEY_PASSWORD:
-        required: false
-      SIGNING_STORE_PASSWORD:
-        required: false
-      SERVICE_ACCOUNT_JSON:
-        required: false
-      KEYSTORE:
-        required: false
-  workflow_call:
-    inputs:
-      build_type:
-        type: string
-        description: "Build type"
-        required: true
-        default: debug
-      flavor:
-        type: string
-        description: "Product flavor"
-        required: false
-        default: fdroid
-    secrets:
-      SIGNING_KEY_ALIAS:
-        required: false
-      SIGNING_KEY_PASSWORD:
-        required: false
-      SIGNING_STORE_PASSWORD:
-        required: false
-      SERVICE_ACCOUNT_JSON:
-        required: false
-      KEYSTORE:
-        required: false
 
 env:
   UPLOAD_DIR_ANDROID: android_artifacts
@@ -75,31 +41,36 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: gradle
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
+
       - name: Decode Keystore
+        if: ${{ github.event.inputs.build_type != 'debug' }}
         id: decode_keystore
         uses: timheuer/base64-to-file@v1.2
         with:
           fileName: ${{ env.KEY_STORE_FILE }}
           fileDir: ${{ env.KEY_STORE_LOCATION }}
           encodedString: ${{ secrets.KEYSTORE }}
+
       - name: Create keystore path env var
-        if: ${{ inputs.build_type != 'debug' }}
+        if: ${{ github.event.inputs.build_type != 'debug' }}
         run: |
           store_path=${{ env.KEY_STORE_LOCATION }}${{ env.KEY_STORE_FILE }}
           echo "KEY_STORE_PATH=$store_path" >> $GITHUB_ENV
 
       - name: Build APK
         run: |
-          flavor=${{ inputs.flavor }}
-          build_type=${{ inputs.build_type }}
+          flavor=${{ github.event.inputs.flavor }}
+          build_type=${{ github.event.inputs.build_type }}
           case $build_type in
             "release")
               ./gradlew :app:assemble${flavor^}Release --info
@@ -111,14 +82,25 @@ jobs:
               ./gradlew :app:assemble${flavor^}Debug --stacktrace
               ;;
           esac
-      - name: Get release apk path
+
+      - name: Get APK path
         id: apk-path
-        run: echo "path=$(find . -regex '^.*/build/outputs/apk/${{ inputs.flavor }}/${{ inputs.build_type }}/.*\.apk$' -type f | head -1 | tail -c+2)" >> $GITHUB_OUTPUT
-      - name: Upload All APK Artifacts
-        uses: actions/upload-artifact@v6
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
+          echo "path=$APK_PATH" >> $GITHUB_OUTPUT
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: android_artifacts_${{ inputs.flavor }}
-          path: >-
-            app/build/outputs/apk/${{ inputs.flavor }}/${{ inputs.build_type }}/*.apk
-          retention-days: 1
-          if-no-files-found: warn
+          name: android_artifacts_${{ github.event.inputs.flavor }}_${{ github.event.inputs.build_type }}
+          path: ${{ steps.apk-path.outputs.path }}
+
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v1.0.6-${{ github.run_number }}
+          name: Release 1.0.6 (Build ${{ github.run_number }})
+          files: ${{ steps.apk-path.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
